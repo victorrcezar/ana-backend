@@ -3,14 +3,11 @@ const http = require("http");
 const PORT = process.env.PORT || 3000;
 
 // ================== CONFIG MULTI-TENANT ==================
-// Lista branca de instâncias permitidas
 const TENANTS = {
   "andrade-e-teixeira": {
     tenantId: "andrade_teixeira",
     nome: "Andrade e Teixeira Advogados"
   }
-  // futuramente:
-  // "up-company": { tenantId: "up_company", nome: "UP Company" }
 };
 
 // ================== UTIL ==================
@@ -26,6 +23,23 @@ function readJson(req) {
       }
     });
   });
+}
+
+// Extrai telefone com fallback seguro
+function extractTelefone(data) {
+  if (data?.key?.remoteJid) {
+    return data.key.remoteJid.replace("@s.whatsapp.net", "");
+  }
+
+  if (data?.key?.participant) {
+    return data.key.participant.replace("@s.whatsapp.net", "");
+  }
+
+  if (data?.from) {
+    return data.from.replace("@s.whatsapp.net", "");
+  }
+
+  return "desconhecido";
 }
 
 // ================== SERVER ==================
@@ -66,14 +80,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // ===== NORMALIZA MENSAGEM =====
+      // ===== NORMALIZA =====
       const data = body.data || {};
       const message = data.message || {};
 
-      const telefone =
-        data.key && data.key.remoteJid
-          ? data.key.remoteJid.replace("@s.whatsapp.net", "")
-          : "desconhecido";
+      const telefone = extractTelefone(data);
 
       let tipo = "unknown";
       let conteudoTexto = "";
@@ -83,7 +94,7 @@ const server = http.createServer(async (req, res) => {
         conteudoTexto = message.conversation;
       }
 
-      // ===== LOG SEGURO =====
+      // ===== LOG FINAL =====
       console.log("========== MENSAGEM RECEBIDA ==========");
       console.log("🏷️ Tenant:", tenant.tenantId);
       console.log("🏢 Empresa:", tenant.nome);
@@ -92,7 +103,6 @@ const server = http.createServer(async (req, res) => {
       console.log("📝 Conteúdo:", conteudoTexto);
       console.log("======================================");
 
-      // ⚠️ AINDA NÃO RESPONDE
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
       return;
