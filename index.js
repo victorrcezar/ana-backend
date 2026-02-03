@@ -3,12 +3,10 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
-const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
 
 // ================== FLAGS DE SEGURANÇA ==================
 const WHITELIST_TELEFONES = ["5527992980043"];
-const SEND_WHATSAPP_ENABLED = true;
+const SEND_WHATSAPP_ENABLED = false; // 🔒 IMPORTANTE: NÃO ENVIAR WHATSAPP AGORA
 
 // ================== DB ==================
 const pool = new Pool({
@@ -23,7 +21,6 @@ const pool = new Pool({
 const TENANTS = {
   "andrade-e-teixeira": {
     tenantId: "andrade_teixeira",
-    instanceName: "andrade-e-teixeira",
     systemPrompt: `
 🤖 AGENTE “ANA” — ATENDIMENTO INICIAL 24H ASSISTIDO
 Andrade e Teixeira Advogados
@@ -44,25 +41,16 @@ Direito de Família
 
 Se não for dessas áreas, explique com educação.
 
-REGRA DE HORÁRIO:
-Fora do horário comercial → triagem completa.
-Durante horário comercial → acolher, identificar assunto e avisar que um advogado continuará.
-
 REGRAS:
 Nunca dê parecer jurídico.
 Nunca prometa resultado.
 Nunca fale valores.
-Nunca use linguagem técnica.
 Nunca pressione.
+Sempre UMA pergunta por mensagem.
 
 INÍCIO PADRÃO:
 "Oi, eu sou a Ana 😊
 Posso te chamar por qual nome?"
-
-Sempre UMA pergunta por mensagem.
-Sempre validar sentimentos quando sensível.
-Sempre pedir consentimento para encaminhar.
-Sempre encerrar de forma humanizada.
 `,
   },
 };
@@ -94,6 +82,7 @@ function extractTelefoneEvolution(data) {
     data?.key?.participant ||
     data?.from ||
     null;
+
   return raw ? normalizeTelefone(raw.replace("@s.whatsapp.net", "")) : null;
 }
 
@@ -119,30 +108,42 @@ async function ensureTables() {
       autor TEXT,
       tipo TEXT,
       conteudo TEXT,
+      message_id TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
+async function mensagemJaProcessada(messageId) {
+  if (!messageId) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM mensagens WHERE message_id = $1 LIMIT 1`,
+    [messageId]
+  );
+  return rows.length > 0;
+}
+
 async function salvarMensagem(d) {
   await pool.query(
-    `INSERT INTO mensagens (tenant, telefone, origem, autor, tipo, conteudo)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [d.tenant, d.telefone, d.origem, d.autor, d.tipo, d.conteudo]
+    `
+    INSERT INTO mensagens
+    (tenant, telefone, origem, autor, tipo, conteudo, message_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `,
+    [
+      d.tenant,
+      d.telefone,
+      d.origem,
+      d.autor,
+      d.tipo,
+      d.conteudo,
+      d.message_id || null,
+    ]
   );
 }
 
 // ================== IA ==================
-async function responderIA(tenantCfg, historico, ultimaMensagem) {
-  const messages = [
-    { role: "system", content: tenantCfg.systemPrompt },
-    ...historico.map((m) => ({
-      role: m.autor === "cliente" ? "user" : "assistant",
-      content: m.conteudo,
-    })),
-    { role: "user", content: ultimaMensagem },
-  ];
-
+async function responderIA(tenantCfg, texto) {
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -151,43 +152,37 @@ async function responderIA(tenantCfg, historico, ultimaMensagem) {
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
-      messages,
+      messages: [
+        { role: "system", content: tenantCfg.systemPrompt },
+        { role: "user", content: texto },
+      ],
       temperature: 0.3,
     }),
   });
 
   const json = await resp.json();
-  return json.choices?.[0]?.message?.content || "";
-}
-
-// ================== WHATSAPP SEND ==================
-async function sendWhatsapp(instance, telefone, texto) {
-  if (!SEND_WHATSAPP_ENABLED) return;
-
-  await fetch(`${EVOLUTION_API_URL}/message/sendText/${instance}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: EVOLUTION_API_KEY,
-    },
-    body: JSON.stringify({
-      number: telefone,
-      text: texto,
-    }),
-  });
+  return json?.choices?.[0]?.message?.content || "";
 }
 
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     const body = await readJson(req);
+
     const instance = body.instance || body.instanceName;
     const tenantCfg = TENANTS[instance];
     if (!tenantCfg) return res.end("ignored");
 
-    const texto = body.data?.message?.conversation;
+    const texto = body?.data?.message?.conversation;
     const telefone = extractTelefoneEvolution(body.data);
+    const messageId = body?.data?.key?.id || null;
+
     if (!texto || !telefone) return res.end("ignored");
+
+    if (await mensagemJaProcessada(messageId)) {
+      console.log("🔁 Mensagem duplicada ignorada:", messageId);
+      return res.end("ok");
+    }
 
     console.log(`
 ========== WHATSAPP ==========
@@ -204,11 +199,12 @@ const server = http.createServer(async (req, res) => {
       autor: "cliente",
       tipo: "text",
       conteudo: texto,
+      message_id: messageId,
     });
 
     if (!WHITELIST_TELEFONES.includes(telefone)) return res.end("ok");
 
-    const resposta = await responderIA(tenantCfg, [], texto);
+    const resposta = await responderIA(tenantCfg, texto);
 
     await salvarMensagem({
       tenant: tenantCfg.tenantId,
@@ -227,7 +223,7 @@ ${resposta}
 ========================
 `);
 
-    await sendWhatsapp(tenantCfg.instanceName, telefone, resposta);
+    // 🔒 NÃO ENVIAMOS WHATSAPP AGORA (EVITA CONFLITO COM DIGISAC)
 
     return res.end("ok");
   }
@@ -235,6 +231,7 @@ ${resposta}
   res.end("OK");
 });
 
+// ================== START ==================
 ensureTables().then(() => {
   server.listen(PORT, () =>
     console.log(`🚀 Backend rodando na porta ${PORT}`)
