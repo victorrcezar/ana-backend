@@ -1,20 +1,30 @@
 const http = require("http");
+const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 
-// ================== CONFIG MULTI-TENANT ==================
+// ================== DB ==================
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 5432),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+});
+
+// ================== TENANTS ==================
 const TENANTS = {
   "andrade-e-teixeira": {
     tenantId: "andrade_teixeira",
-    nome: "Andrade e Teixeira Advogados"
-  }
+    nome: "Andrade e Teixeira Advogados",
+  },
 };
 
 // ================== UTIL ==================
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", chunk => (data += chunk));
+    req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       try {
         resolve(JSON.parse(data || "{}"));
@@ -25,18 +35,15 @@ function readJson(req) {
   });
 }
 
-// -------- TELEFONE EVOLUTION --------
 function extractTelefoneEvolution(data) {
-  if (data?.key?.remoteJid)
-    return data.key.remoteJid.replace("@s.whatsapp.net", "");
-  if (data?.key?.participant)
-    return data.key.participant.replace("@s.whatsapp.net", "");
-  if (data?.from)
-    return data.from.replace("@s.whatsapp.net", "");
-  return null;
+  return (
+    data?.key?.remoteJid?.replace("@s.whatsapp.net", "") ||
+    data?.key?.participant?.replace("@s.whatsapp.net", "") ||
+    data?.from?.replace("@s.whatsapp.net", "") ||
+    null
+  );
 }
 
-// -------- TELEFONE DIGISAC --------
 function extractTelefoneDigisac(body) {
   return (
     body?.data?.message?.contact?.phone ||
@@ -46,13 +53,59 @@ function extractTelefoneDigisac(body) {
   );
 }
 
+// ================== DB HELPERS ==================
+async function ensureTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contatos (
+      id SERIAL PRIMARY KEY,
+      tenant TEXT NOT NULL,
+      telefone TEXT NOT NULL,
+      status TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (tenant, telefone)
+    );
+  `);
+}
+
+async function upsertContato(tenant, telefone, status) {
+  await pool.query(
+    `
+    INSERT INTO contatos (tenant, telefone, status)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (tenant, telefone)
+    DO UPDATE SET status = $3, updated_at = NOW();
+    `,
+    [tenant, telefone, status]
+  );
+}
+
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
-  // -------- health --------
+  // -------- HEALTH --------
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
     return;
+  }
+
+  // -------- DEBUG DB --------
+  if (req.method === "GET" && req.url === "/debug/db") {
+    try {
+      await upsertContato(
+        "andrade_teixeira",
+        "559999999999",
+        "teste_manual"
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "insert_ok" }));
+      return;
+    } catch (err) {
+      console.error("❌ ERRO DB:", err);
+      res.writeHead(500);
+      res.end("db_error");
+      return;
+    }
   }
 
   // ================= WHATSAPP =================
@@ -67,7 +120,6 @@ const server = http.createServer(async (req, res) => {
         null;
 
       if (!instance || !TENANTS[instance]) {
-        res.writeHead(200);
         res.end("ignored");
         return;
       }
@@ -75,36 +127,27 @@ const server = http.createServer(async (req, res) => {
       const data = body.data || {};
       const message = data.message || {};
 
-      // ignora eventos que não são mensagem de texto
       if (!message.conversation) {
-        res.writeHead(200);
         res.end("ignored");
         return;
       }
 
       const telefone = extractTelefoneEvolution(data);
       if (!telefone) {
-        res.writeHead(200);
         res.end("ignored");
         return;
       }
 
-      const tenant = TENANTS[instance];
+      const tenant = TENANTS[instance].tenantId;
 
-      console.log("========== WHATSAPP ==========");
-      console.log("🏷️ Tenant:", tenant.tenantId);
-      console.log("📞 Telefone:", telefone);
-      console.log("📩 Tipo: text");
-      console.log("📝 Conteúdo:", message.conversation);
-      console.log("📌 Status inferido: novo_lead");
-      console.log("==============================");
+      await upsertContato(tenant, telefone, "novo_lead");
 
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok" }));
+      console.log("WHATSAPP:", tenant, telefone, "novo_lead");
+
+      res.end("ok");
       return;
     } catch (err) {
       console.error("❌ Erro WhatsApp:", err);
-      res.writeHead(200);
       res.end("error");
       return;
     }
@@ -114,9 +157,13 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/webhook/digisac") {
     try {
       const body = await readJson(req);
-
-      const evento = body.event || "desconhecido";
+      const evento = body.event;
       const telefone = extractTelefoneDigisac(body);
+
+      if (!telefone) {
+        res.end("ignored");
+        return;
+      }
 
       let status = null;
 
@@ -131,28 +178,33 @@ const server = http.createServer(async (req, res) => {
         status = "atendimento_encerrado";
       }
 
-      console.log("========== DIGISAC ==========");
-      console.log("📞 Telefone:", telefone || "desconhecido");
-      console.log("🔔 Evento:", evento);
-      if (status) console.log("📌 Status atualizado:", status);
-      console.log("=============================");
+      if (status) {
+        await upsertContato("andrade_teixeira", telefone, status);
+        console.log("DIGISAC:", telefone, status);
+      }
 
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "received" }));
+      res.end("ok");
       return;
     } catch (err) {
       console.error("❌ Erro DigiSac:", err);
-      res.writeHead(200);
       res.end("error");
       return;
     }
   }
 
+  // -------- FALLBACK --------
   res.writeHead(404);
   res.end("Not Found");
 });
 
 // ================== START ==================
-server.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
+ensureTable()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`🚀 Backend rodando na porta ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("❌ ERRO AO INICIAR DB:", err);
+    process.exit(1);
+  });
