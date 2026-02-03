@@ -3,9 +3,12 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
 
-// ================== WHITELIST ==================
+// ================== FLAGS DE SEGURANÇA ==================
 const WHITELIST_TELEFONES = ["5527992980043"];
+const SEND_WHATSAPP_ENABLED = true;
 
 // ================== DB ==================
 const pool = new Pool({
@@ -20,12 +23,46 @@ const pool = new Pool({
 const TENANTS = {
   "andrade-e-teixeira": {
     tenantId: "andrade_teixeira",
-    nome: "Andrade e Teixeira Advogados",
+    instanceName: "andrade-e-teixeira",
     systemPrompt: `
-Você é a ANA, assistente de atendimento inicial do escritório Andrade e Teixeira Advogados.
-Seu papel é acolher, entender a demanda e orientar os próximos passos.
-Seja clara, educada e profissional.
-Não prometa resultados, não informe valores e não dê parecer jurídico definitivo.
+🤖 AGENTE “ANA” — ATENDIMENTO INICIAL 24H ASSISTIDO
+Andrade e Teixeira Advogados
+
+Você se chama Ana e é a responsável pelo Atendimento Inicial do escritório Andrade e Teixeira Advogados.
+Você conversa com pessoas reais, muitas vezes em momentos sensíveis.
+Seu atendimento deve ser humano, calmo, acolhedor e respeitoso, como uma conversa educada no WhatsApp.
+
+Você NÃO é advogada.
+
+OBJETIVO:
+Acolher o cliente, entender o assunto de forma simples, organizar as informações básicas e preparar o caso para um advogado.
+
+ÁREAS ATENDIDAS:
+Direito Previdenciário
+Direito do Trabalho
+Direito de Família
+
+Se não for dessas áreas, explique com educação.
+
+REGRA DE HORÁRIO:
+Fora do horário comercial → triagem completa.
+Durante horário comercial → acolher, identificar assunto e avisar que um advogado continuará.
+
+REGRAS:
+Nunca dê parecer jurídico.
+Nunca prometa resultado.
+Nunca fale valores.
+Nunca use linguagem técnica.
+Nunca pressione.
+
+INÍCIO PADRÃO:
+"Oi, eu sou a Ana 😊
+Posso te chamar por qual nome?"
+
+Sempre UMA pergunta por mensagem.
+Sempre validar sentimentos quando sensível.
+Sempre pedir consentimento para encaminhar.
+Sempre encerrar de forma humanizada.
 `,
   },
 };
@@ -46,7 +83,6 @@ function readJson(req) {
 }
 
 function normalizeTelefone(raw) {
-  if (!raw) return null;
   let tel = raw.replace(/\D/g, "");
   if (tel.length === 11) tel = "55" + tel;
   return tel;
@@ -58,19 +94,17 @@ function extractTelefoneEvolution(data) {
     data?.key?.participant ||
     data?.from ||
     null;
-
-  if (!raw) return null;
-  return normalizeTelefone(raw.replace("@s.whatsapp.net", ""));
+  return raw ? normalizeTelefone(raw.replace("@s.whatsapp.net", "")) : null;
 }
 
-// ================== DB SETUP ==================
+// ================== DB ==================
 async function ensureTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS contatos (
       id SERIAL PRIMARY KEY,
-      tenant TEXT NOT NULL,
-      telefone TEXT NOT NULL,
-      status TEXT NOT NULL,
+      tenant TEXT,
+      telefone TEXT,
+      status TEXT,
       updated_at TIMESTAMP DEFAULT NOW(),
       UNIQUE (tenant, telefone)
     );
@@ -79,65 +113,27 @@ async function ensureTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mensagens (
       id SERIAL PRIMARY KEY,
-      tenant TEXT NOT NULL,
-      telefone TEXT NOT NULL,
-      origem TEXT NOT NULL,
-      autor TEXT NOT NULL,
-      tipo TEXT NOT NULL,
-      conteudo TEXT NOT NULL,
+      tenant TEXT,
+      telefone TEXT,
+      origem TEXT,
+      autor TEXT,
+      tipo TEXT,
+      conteudo TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
-// ================== DB HELPERS ==================
-async function upsertContato(tenant, telefone, status) {
+async function salvarMensagem(d) {
   await pool.query(
-    `
-    INSERT INTO contatos (tenant, telefone, status)
-    VALUES ($1, $2, $3)
-    ON CONFLICT (tenant, telefone)
-    DO UPDATE SET status = $3, updated_at = NOW();
-    `,
-    [tenant, telefone, status]
+    `INSERT INTO mensagens (tenant, telefone, origem, autor, tipo, conteudo)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [d.tenant, d.telefone, d.origem, d.autor, d.tipo, d.conteudo]
   );
-}
-
-async function getStatusContato(tenant, telefone) {
-  const { rows } = await pool.query(
-    `SELECT status FROM contatos WHERE tenant = $1 AND telefone = $2`,
-    [tenant, telefone]
-  );
-  return rows[0]?.status || null;
-}
-
-async function salvarMensagem({ tenant, telefone, origem, autor, tipo, conteudo }) {
-  await pool.query(
-    `
-    INSERT INTO mensagens
-    (tenant, telefone, origem, autor, tipo, conteudo)
-    VALUES ($1, $2, $3, $4, $5, $6);
-    `,
-    [tenant, telefone, origem, autor, tipo, conteudo]
-  );
-}
-
-async function buscarHistorico(tenant, telefone, limite = 10) {
-  const { rows } = await pool.query(
-    `
-    SELECT autor, conteudo
-    FROM mensagens
-    WHERE tenant = $1 AND telefone = $2
-    ORDER BY created_at DESC
-    LIMIT $3
-    `,
-    [tenant, telefone, limite]
-  );
-  return rows.reverse();
 }
 
 // ================== IA ==================
-async function responderIA({ tenantCfg, historico, ultimaMensagem }) {
+async function responderIA(tenantCfg, historico, ultimaMensagem) {
   const messages = [
     { role: "system", content: tenantCfg.systemPrompt },
     ...historico.map((m) => ({
@@ -161,112 +157,69 @@ async function responderIA({ tenantCfg, historico, ultimaMensagem }) {
   });
 
   const json = await resp.json();
-  return json?.choices?.[0]?.message?.content || "";
+  return json.choices?.[0]?.message?.content || "";
+}
+
+// ================== WHATSAPP SEND ==================
+async function sendWhatsapp(instance, telefone, texto) {
+  if (!SEND_WHATSAPP_ENABLED) return;
+
+  await fetch(`${EVOLUTION_API_URL}/message/sendText/${instance}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: EVOLUTION_API_KEY,
+    },
+    body: JSON.stringify({
+      number: telefone,
+      text: texto,
+    }),
+  });
 }
 
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
-  if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200);
-    res.end("OK");
-    return;
-  }
-
-  // ================= WHATSAPP =================
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
-    try {
-      const body = await readJson(req);
+    const body = await readJson(req);
+    const instance = body.instance || body.instanceName;
+    const tenantCfg = TENANTS[instance];
+    if (!tenantCfg) return res.end("ignored");
 
-      const instance =
-        body.instance || body.instanceName || body?.data?.instance || null;
+    const texto = body.data?.message?.conversation;
+    const telefone = extractTelefoneEvolution(body.data);
+    if (!texto || !telefone) return res.end("ignored");
 
-      if (!instance || !TENANTS[instance]) {
-        res.end("ignored");
-        return;
-      }
-
-      const data = body.data || {};
-      const message = data.message || {};
-      if (!message.conversation) {
-        res.end("ignored");
-        return;
-      }
-
-      const telefone = extractTelefoneEvolution(data);
-      if (!telefone) {
-        res.end("ignored");
-        return;
-      }
-
-      const tenantCfg = TENANTS[instance];
-      const tenant = tenantCfg.tenantId;
-      const texto = message.conversation;
-
-      // 🔹 LOG COMPLETO DA MENSAGEM RECEBIDA
-      console.log(`
+    console.log(`
 ========== WHATSAPP ==========
-🏷️ Tenant: ${tenant}
+🏷️ Tenant: ${tenantCfg.tenantId}
 📞 Telefone: ${telefone}
-📩 Tipo: text
 📝 Conteúdo: ${texto}
 ==============================
 `);
 
-      // 1️⃣ salvar mensagem do cliente
-      await salvarMensagem({
-        tenant,
-        telefone,
-        origem: "whatsapp",
-        autor: "cliente",
-        tipo: "text",
-        conteudo: texto,
-      });
+    await salvarMensagem({
+      tenant: tenantCfg.tenantId,
+      telefone,
+      origem: "whatsapp",
+      autor: "cliente",
+      tipo: "text",
+      conteudo: texto,
+    });
 
-      // 2️⃣ garantir contato
-      await upsertContato(tenant, telefone, "novo_lead");
+    if (!WHITELIST_TELEFONES.includes(telefone)) return res.end("ok");
 
-      // 🔒 WHITELIST
-      if (!WHITELIST_TELEFONES.includes(telefone)) {
-        console.log("ANA BLOQUEADA (WHITELIST)");
-        res.end("ok");
-        return;
-      }
+    const resposta = await responderIA(tenantCfg, [], texto);
 
-      // 3️⃣ status
-      const status = await getStatusContato(tenant, telefone);
-      if (status !== "novo_lead") {
-        console.log("ANA BLOQUEADA (STATUS)");
-        res.end("ok");
-        return;
-      }
+    await salvarMensagem({
+      tenant: tenantCfg.tenantId,
+      telefone,
+      origem: "whatsapp",
+      autor: "ia",
+      tipo: "text",
+      conteudo: resposta,
+    });
 
-      // 4️⃣ histórico
-      const historico = await buscarHistorico(tenant, telefone, 10);
-
-      // 5️⃣ IA responde
-      const resposta = await responderIA({
-        tenantCfg,
-        historico,
-        ultimaMensagem: texto,
-      });
-
-      if (!resposta) {
-        res.end("ok");
-        return;
-      }
-
-      // 6️⃣ salvar resposta da IA
-      await salvarMensagem({
-        tenant,
-        telefone,
-        origem: "whatsapp",
-        autor: "ia",
-        tipo: "text",
-        conteudo: resposta,
-      });
-
-      // 🔹 LOG COMPLETO DA RESPOSTA DA ANA
-      console.log(`
+    console.log(`
 ========== ANA ==========
 🤖 Para: ${telefone}
 📝 Resposta:
@@ -274,27 +227,16 @@ ${resposta}
 ========================
 `);
 
-      res.end("ok");
-      return;
-    } catch (err) {
-      console.error("❌ Erro WhatsApp:", err);
-      res.end("error");
-      return;
-    }
+    await sendWhatsapp(tenantCfg.instanceName, telefone, resposta);
+
+    return res.end("ok");
   }
 
-  res.writeHead(404);
-  res.end("Not Found");
+  res.end("OK");
 });
 
-// ================== START ==================
-ensureTables()
-  .then(() => {
-    server.listen(PORT, () => {
-      console.log(`🚀 Backend rodando na porta ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error("❌ ERRO AO INICIAR:", err);
-    process.exit(1);
-  });
+ensureTables().then(() => {
+  server.listen(PORT, () =>
+    console.log(`🚀 Backend rodando na porta ${PORT}`)
+  );
+});
