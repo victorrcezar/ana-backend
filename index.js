@@ -5,7 +5,6 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // ================== WHITELIST ==================
-// Sempre no formato 55DDDNÚMERO
 const WHITELIST_TELEFONES = ["5527992980043"];
 
 // ================== DB ==================
@@ -203,6 +202,16 @@ const server = http.createServer(async (req, res) => {
       const tenant = tenantCfg.tenantId;
       const texto = message.conversation;
 
+      // 🔹 LOG COMPLETO DA MENSAGEM RECEBIDA
+      console.log(`
+========== WHATSAPP ==========
+🏷️ Tenant: ${tenant}
+📞 Telefone: ${telefone}
+📩 Tipo: text
+📝 Conteúdo: ${texto}
+==============================
+`);
+
       // 1️⃣ salvar mensagem do cliente
       await salvarMensagem({
         tenant,
@@ -216,9 +225,9 @@ const server = http.createServer(async (req, res) => {
       // 2️⃣ garantir contato
       await upsertContato(tenant, telefone, "novo_lead");
 
-      // 🔒 WHITELIST ABSOLUTA
+      // 🔒 WHITELIST
       if (!WHITELIST_TELEFONES.includes(telefone)) {
-        console.log("ANA BLOQUEADA (WHITELIST):", telefone);
+        console.log("ANA BLOQUEADA (WHITELIST)");
         res.end("ok");
         return;
       }
@@ -226,7 +235,7 @@ const server = http.createServer(async (req, res) => {
       // 3️⃣ status
       const status = await getStatusContato(tenant, telefone);
       if (status !== "novo_lead") {
-        console.log("ANA BLOQUEADA (STATUS):", status);
+        console.log("ANA BLOQUEADA (STATUS)");
         res.end("ok");
         return;
       }
@@ -234,7 +243,7 @@ const server = http.createServer(async (req, res) => {
       // 4️⃣ histórico
       const historico = await buscarHistorico(tenant, telefone, 10);
 
-      // 5️⃣ IA
+      // 5️⃣ IA responde
       const resposta = await responderIA({
         tenantCfg,
         historico,
@@ -256,7 +265,14 @@ const server = http.createServer(async (req, res) => {
         conteudo: resposta,
       });
 
-      console.log("ANA RESPONDEU (TESTE):", telefone, resposta);
+      // 🔹 LOG COMPLETO DA RESPOSTA DA ANA
+      console.log(`
+========== ANA ==========
+🤖 Para: ${telefone}
+📝 Resposta:
+${resposta}
+========================
+`);
 
       res.end("ok");
       return;
