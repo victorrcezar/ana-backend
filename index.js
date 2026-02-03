@@ -3,9 +3,10 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 
-// 🔒 Tenant fixo por enquanto
+// 🔒 FIXOS DO SEU PROJETO
 const TENANT = "andrade_teixeira";
 const ORIGEM = "whatsapp";
+const TIPO_TEXTO = "text";
 
 // ================== DB ==================
 const pool = new Pool({
@@ -37,21 +38,30 @@ function normalizeTelefone(raw) {
   return t;
 }
 
-// ================== DB HELPERS ==================
-async function salvarMensagem({ tenant, telefone, origem, autor, conteudo }) {
+// ================== DB ==================
+async function salvarMensagem({
+  tenant,
+  telefone,
+  origem,
+  autor,
+  tipo,
+  conteudo,
+}) {
   await pool.query(
     `
-    INSERT INTO mensagens (tenant, telefone, origem, autor, conteudo)
-    VALUES ($1,$2,$3,$4,$5)
+    INSERT INTO mensagens
+      (tenant, telefone, origem, autor, tipo, conteudo)
+    VALUES
+      ($1,$2,$3,$4,$5,$6)
   `,
-    [tenant, telefone, origem, autor, conteudo]
+    [tenant, telefone, origem, autor, tipo, conteudo]
   );
 }
 
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
   try {
-    // Healthcheck (evita SIGTERM do orquestrador)
+    // 🩺 Healthcheck
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200);
       return res.end("OK");
@@ -63,55 +73,41 @@ const server = http.createServer(async (req, res) => {
       console.log("📦 BODY RECEBIDO:");
       console.log(JSON.stringify(body, null, 2));
 
-      if (!body.data) {
-        return res.end("ok");
-      }
+      if (!body.data) return res.end("ok");
 
       const data = body.data;
 
-      // Ignora mensagens enviadas pelo próprio sistema
-      if (data.isFromMe === true) {
-        return res.end("ok");
-      }
+      // ❌ Ignora mensagens enviadas pelo sistema / humano
+      if (data.isFromMe === true) return res.end("ok");
 
-      // Apenas mensagens de chat
-      if (data.type !== "chat") {
-        return res.end("ok");
-      }
+      // ❌ Ignora tudo que não for texto
+      if (data.type !== "chat") return res.end("ok");
+      if (!data.text) return res.end("ok");
 
-      const texto = data.text;
-      const contactId = data.contactId;
+      const telefone = normalizeTelefone(data.contactId);
 
-      if (!texto || !contactId) {
-        return res.end("ok");
-      }
-
-      // ⚠️ Enquanto o DigiSac não envia telefone direto,
-      // usamos contactId como fallback técnico
-      const telefone = normalizeTelefone(contactId);
-
-      // 🧾 CONTEÚDO NO FORMATO QUE VOCÊ PEDIU
       const conteudoFormatado =
         `📞 Telefone: ${telefone}\n` +
         `📩 Tipo: text\n` +
-        `📝 Conteúdo: ${texto}`;
+        `📝 Conteúdo: ${data.text}`;
 
       await salvarMensagem({
         tenant: TENANT,
         telefone,
         origem: ORIGEM,
         autor: "cliente",
+        tipo: TIPO_TEXTO,
         conteudo: conteudoFormatado,
       });
 
-      console.log("✅ Mensagem salva no banco");
+      console.log("✅ Mensagem salva com sucesso");
 
       return res.end("ok");
     }
 
     res.end("OK");
   } catch (err) {
-    // 🔥 NUNCA MAIS DERRUBA O PROCESSO
+    // 🔥 Nunca derruba o processo
     console.error("💥 ERRO CAPTURADO:", err);
     return res.end("ok");
   }
