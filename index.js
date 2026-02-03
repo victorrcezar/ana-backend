@@ -18,7 +18,7 @@ const pool = new Pool({
 function readJson(req) {
   return new Promise(resolve => {
     let data = "";
-    req.on("data", chunk => (data += chunk));
+    req.on("data", c => (data += c));
     req.on("end", () => {
       try {
         resolve(JSON.parse(data || "{}"));
@@ -29,34 +29,58 @@ function readJson(req) {
   });
 }
 
+function normalizeTelefone(raw) {
+  let t = String(raw || "").replace(/\D/g, "");
+  if (t.length === 11) t = "55" + t;
+  return t;
+}
+
+// ================== DIGISAC API ==================
+async function buscarTelefoneContato(contactId) {
+  const res = await fetch(`${DIGISAC_API_URL}/api/v1/contacts/${contactId}`, {
+    headers: {
+      Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
+    },
+  });
+
+  const json = await res.json();
+
+  // Número vem aqui no DigiSac
+  return normalizeTelefone(
+    json?.data?.number ||
+    json?.number ||
+    ""
+  );
+}
+
 // ================== DB HELPERS ==================
-async function getContato(contactId) {
+async function getContato(telefone) {
   const { rows } = await pool.query(
-    "SELECT * FROM contatos WHERE contact_id = $1 LIMIT 1",
-    [contactId]
+    "SELECT * FROM contatos WHERE telefone = $1 LIMIT 1",
+    [telefone]
   );
   return rows[0] || null;
 }
 
-async function salvarContato(contactId, status) {
+async function salvarContato(telefone, status) {
   await pool.query(
     `
-    INSERT INTO contatos (contact_id, status)
+    INSERT INTO contatos (telefone, status)
     VALUES ($1,$2)
-    ON CONFLICT (contact_id)
+    ON CONFLICT (telefone)
     DO UPDATE SET status = $2
   `,
-    [contactId, status]
+    [telefone, status]
   );
 }
 
-async function salvarMensagem({ contactId, autor, conteudo }) {
+async function salvarMensagem({ telefone, autor, conteudo }) {
   await pool.query(
     `
-    INSERT INTO mensagens (contact_id, autor, conteudo)
+    INSERT INTO mensagens (telefone, autor, conteudo)
     VALUES ($1,$2,$3)
   `,
-    [contactId, autor, conteudo]
+    [telefone, autor, conteudo]
   );
 }
 
@@ -81,22 +105,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/webhook/digisac") {
     const body = await readJson(req);
 
-    // Estrutura real do DigiSac
-    if (!body.data) {
-      return res.end("ok");
-    }
+    if (!body.data) return res.end("ok");
 
     const data = body.data;
 
-    // Ignora mensagens enviadas pela própria plataforma
-    if (data.isFromMe === true) {
-      return res.end("ok");
-    }
-
-    // Apenas mensagens de chat/texto
-    if (data.type !== "chat") {
-      return res.end("ok");
-    }
+    if (data.isFromMe === true) return res.end("ok");
+    if (data.type !== "chat") return res.end("ok");
 
     const contactId = data.contactId;
     const ticketId = data.ticketId;
@@ -106,22 +120,32 @@ const server = http.createServer(async (req, res) => {
       return res.end("ok");
     }
 
-    // Salva mensagem do cliente
+    // 🔥 BUSCA TELEFONE REAL
+    const telefone = await buscarTelefoneContato(contactId);
+    if (!telefone) return res.end("ok");
+
+    // 🧾 CONTEÚDO FORMATADO (DO JEITO QUE VOCÊ PEDIU)
+    const conteudoFormatado =
+      `📞 Telefone: ${telefone}\n` +
+      `📩 Tipo: text\n` +
+      `📝 Conteúdo: ${texto}`;
+
+    // Salva mensagem
     await salvarMensagem({
-      contactId,
+      telefone,
       autor: "cliente",
-      conteudo: texto,
+      conteudo: conteudoFormatado,
     });
 
-    let contato = await getContato(contactId);
+    let contato = await getContato(telefone);
 
     // ===== PRIMEIRO CONTATO
     if (!contato) {
-      await salvarContato(contactId, "aguardando_nome");
+      await salvarContato(telefone, "aguardando_nome");
 
       const resposta = "Oi 😊 Posso te chamar por qual nome?";
       await salvarMensagem({
-        contactId,
+        telefone,
         autor: "ana",
         conteudo: resposta,
       });
@@ -132,12 +156,12 @@ const server = http.createServer(async (req, res) => {
 
     // ===== AGUARDANDO NOME
     if (contato.status === "aguardando_nome") {
-      await salvarContato(contactId, "aguardando_assunto");
+      await salvarContato(telefone, "aguardando_assunto");
 
       const resposta =
         "Prazer 😊 Me conta, por favor: qual assunto você gostaria de falar com a gente?";
       await salvarMensagem({
-        contactId,
+        telefone,
         autor: "ana",
         conteudo: resposta,
       });
