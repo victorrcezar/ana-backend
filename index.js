@@ -18,36 +18,52 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
-// ================== TENANTS ==================
-const TENANTS = {
-  "andrade-e-teixeira": {
-    tenantId: "andrade_teixeira",
-    systemPrompt: `
-Oi, eu sou a Ana 😊
-Sou a responsável pelo atendimento inicial do escritório Andrade e Teixeira Advogados.
+// ================== TENANT ==================
+const TENANT = {
+  tenantId: "andrade_teixeira",
+  systemPrompt: `
+Você se chama Ana e faz parte da equipe de atendimento do escritório Andrade e Teixeira Advogados.
 
-Atendo pessoas reais, muitas vezes em momentos sensíveis.
-Meu atendimento é humano, calmo, acolhedor e simples.
+Você conversa com pessoas reais no WhatsApp, muitas vezes em momentos sensíveis.
+Seu tom deve ser humano, calmo, educado e acolhedor.
+Frases curtas. Linguagem simples. Uma pergunta por mensagem.
 
-Não sou advogada.
-Não dou parecer jurídico.
-Não falo valores.
-Não prometo resultados.
+Você NÃO é advogada.
+Nunca dê parecer jurídico.
+Nunca fale valores.
+Nunca prometa resultados.
+Nunca use linguagem técnica.
+Nunca pressione.
 
-Atuamos apenas em:
+O escritório atua apenas em:
 - Direito Previdenciário
 - Direito do Trabalho
 - Direito de Família
 
-Sempre faço UMA pergunta por vez.
-Sempre encerro o atendimento após encaminhar para um advogado.
+Se o assunto não for dessas áreas, explique isso com cuidado e respeito.
+
+Você NUNCA deve dizer que é bot, IA ou assistente virtual.
+Você nunca explica como o atendimento funciona internamente.
+
+Fluxo obrigatório:
+- Cumprimentar
+- Pedir o nome de forma leve
+- Ouvir
+- Identificar o assunto
+- Confirmar se é área atendida
+- Fazer UMA pergunta simples por vez
+- Encaminhar para advogado com consentimento
+- Encerrar de forma educada e humana
+
+Exemplo de início (use apenas uma vez):
+"Oi 😊
+Posso te chamar por qual nome?"
 `
-  }
 };
 
 // ================== UTIL ==================
 function readJson(req) {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     let data = "";
     req.on("data", chunk => data += chunk);
     req.on("end", () => resolve(JSON.parse(data || "{}")));
@@ -60,16 +76,11 @@ function normalizeTelefone(raw) {
   return t;
 }
 
-function extractTelefoneEvolution(data) {
-  const raw = data?.key?.remoteJid;
-  return raw ? normalizeTelefone(raw.replace("@s.whatsapp.net", "")) : null;
-}
-
 // ================== DB ==================
 async function mensagemJaProcessada(messageId) {
   if (!messageId) return false;
   const { rows } = await pool.query(
-    `SELECT 1 FROM mensagens WHERE message_id = $1 LIMIT 1`,
+    "SELECT 1 FROM mensagens WHERE message_id = $1 LIMIT 1",
     [messageId]
   );
   return rows.length > 0;
@@ -92,7 +103,7 @@ async function salvarMensagem(d) {
 }
 
 // ================== IA ==================
-async function responderIA(prompt, texto) {
+async function responderIA(texto) {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -102,7 +113,7 @@ async function responderIA(prompt, texto) {
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: prompt },
+        { role: "system", content: TENANT.systemPrompt },
         { role: "user", content: texto }
       ],
       temperature: 0.3
@@ -118,7 +129,7 @@ async function sendDigisacMessage(ticketId, texto) {
   await fetch(`${DIGISAC_API_URL}/api/v1/messages`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${DIGISAC_API_TOKEN}`,
+      Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -132,30 +143,32 @@ async function sendDigisacMessage(ticketId, texto) {
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
 
-  // 🔹 EVOLUTION → SÓ HISTÓRICO
+  // 🔹 EVOLUTION → SOMENTE HISTÓRICO (NÃO RESPONDE)
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     const body = await readJson(req);
-    const instance = body.instance || body.instanceName;
-    const tenantCfg = TENANTS[instance];
-    if (!tenantCfg) return res.end("ignored");
 
     const texto = body?.data?.message?.conversation;
-    const telefone = extractTelefoneEvolution(body.data);
+    const telefoneRaw = body?.data?.key?.remoteJid;
     const messageId = body?.data?.key?.id;
 
-    if (!texto || !telefone) return res.end("ignored");
+    if (!texto || !telefoneRaw) return res.end("ignored");
+
+    const telefone = normalizeTelefone(
+      telefoneRaw.replace("@s.whatsapp.net", "")
+    );
+
     if (await mensagemJaProcessada(messageId)) return res.end("ok");
 
     console.log(`
 ========== WHATSAPP ==========
-🏷️ Tenant: ${tenantCfg.tenantId}
+🏷️ Tenant: ${TENANT.tenantId}
 📞 Telefone: ${telefone}
 📝 Conteúdo: ${texto}
 ==============================
 `);
 
     await salvarMensagem({
-      tenant: tenantCfg.tenantId,
+      tenant: TENANT.tenantId,
       telefone,
       origem: "whatsapp",
       autor: "cliente",
@@ -167,30 +180,68 @@ const server = http.createServer(async (req, res) => {
     return res.end("ok");
   }
 
-  // 🔹 DIGISAC → AQUI A ANA RESPONDE
+  // 🔹 DIGISAC → A ANA RESPONDE AQUI
   if (req.method === "POST" && req.url === "/webhook/digisac") {
     const body = await readJson(req);
 
+    // Apenas mensagens novas
     if (body.event !== "message.created") return res.end("ok");
+
+    // 🔒 FILTRO ANTI-LOOP (SÓ CLIENTE)
+    const isFromClient =
+      body.message?.from_me === false ||
+      body.message?.author === "customer" ||
+      body.message?.sender_type === "contact";
+
+    if (!isFromClient) {
+      console.log("🚫 Ignorado: mensagem não é do cliente");
+      return res.end("ok");
+    }
 
     const ticketId = body.ticket?.id;
     const telefone = normalizeTelefone(body.contact?.phone || "");
     const texto = body.message?.content;
+    const messageId = body.message?.id || null;
 
     if (!ticketId || !telefone || !texto) return res.end("ok");
     if (!WHITELIST_TELEFONES.includes(telefone)) return res.end("ok");
-
-    const tenantCfg = TENANTS["andrade-e-teixeira"];
-
-    const resposta = await responderIA(tenantCfg.systemPrompt, texto);
+    if (await mensagemJaProcessada(messageId)) return res.end("ok");
 
     console.log(`
-========== ANA (DIGISAC) ==========
+========== DIGISAC ==========
 🎫 Ticket: ${ticketId}
-📞 Para: ${telefone}
+📞 Telefone: ${telefone}
+📝 Conteúdo: ${texto}
+=============================
+`);
+
+    await salvarMensagem({
+      tenant: TENANT.tenantId,
+      telefone,
+      origem: "digisac",
+      autor: "cliente",
+      tipo: "text",
+      conteudo: texto,
+      message_id: messageId
+    });
+
+    const resposta = await responderIA(texto);
+
+    await salvarMensagem({
+      tenant: TENANT.tenantId,
+      telefone,
+      origem: "digisac",
+      autor: "ana",
+      tipo: "text",
+      conteudo: resposta
+    });
+
+    console.log(`
+========== ANA ==========
+🎫 Ticket: ${ticketId}
 📝 Resposta:
 ${resposta}
-==============================
+========================
 `);
 
     await sendDigisacMessage(ticketId, resposta);
