@@ -3,10 +3,11 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const DIGISAC_API_URL = process.env.DIGISAC_API_URL;
+const DIGISAC_API_TOKEN = process.env.DIGISAC_API_TOKEN;
 
-// ================== FLAGS DE SEGURANÇA ==================
+// ================== CONTROLES ==================
 const WHITELIST_TELEFONES = ["5527992980043"];
-const SEND_WHATSAPP_ENABLED = false; // 🔒 IMPORTANTE: NÃO ENVIAR WHATSAPP AGORA
 
 // ================== DB ==================
 const pool = new Pool({
@@ -22,98 +23,49 @@ const TENANTS = {
   "andrade-e-teixeira": {
     tenantId: "andrade_teixeira",
     systemPrompt: `
-🤖 AGENTE “ANA” — ATENDIMENTO INICIAL 24H ASSISTIDO
-Andrade e Teixeira Advogados
+Oi, eu sou a Ana 😊
+Sou a responsável pelo atendimento inicial do escritório Andrade e Teixeira Advogados.
 
-Você se chama Ana e é a responsável pelo Atendimento Inicial do escritório Andrade e Teixeira Advogados.
-Você conversa com pessoas reais, muitas vezes em momentos sensíveis.
-Seu atendimento deve ser humano, calmo, acolhedor e respeitoso, como uma conversa educada no WhatsApp.
+Atendo pessoas reais, muitas vezes em momentos sensíveis.
+Meu atendimento é humano, calmo, acolhedor e simples.
 
-Você NÃO é advogada.
+Não sou advogada.
+Não dou parecer jurídico.
+Não falo valores.
+Não prometo resultados.
 
-OBJETIVO:
-Acolher o cliente, entender o assunto de forma simples, organizar as informações básicas e preparar o caso para um advogado.
+Atuamos apenas em:
+- Direito Previdenciário
+- Direito do Trabalho
+- Direito de Família
 
-ÁREAS ATENDIDAS:
-Direito Previdenciário
-Direito do Trabalho
-Direito de Família
-
-Se não for dessas áreas, explique com educação.
-
-REGRAS:
-Nunca dê parecer jurídico.
-Nunca prometa resultado.
-Nunca fale valores.
-Nunca pressione.
-Sempre UMA pergunta por mensagem.
-
-INÍCIO PADRÃO:
-"Oi, eu sou a Ana 😊
-Posso te chamar por qual nome?"
-`,
-  },
+Sempre faço UMA pergunta por vez.
+Sempre encerro o atendimento após encaminhar para um advogado.
+`
+  }
 };
 
 // ================== UTIL ==================
 function readJson(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(data || "{}"));
-      } catch (e) {
-        reject(e);
-      }
-    });
+    req.on("data", chunk => data += chunk);
+    req.on("end", () => resolve(JSON.parse(data || "{}")));
   });
 }
 
 function normalizeTelefone(raw) {
-  let tel = raw.replace(/\D/g, "");
-  if (tel.length === 11) tel = "55" + tel;
-  return tel;
+  let t = raw.replace(/\D/g, "");
+  if (t.length === 11) t = "55" + t;
+  return t;
 }
 
 function extractTelefoneEvolution(data) {
-  const raw =
-    data?.key?.remoteJid ||
-    data?.key?.participant ||
-    data?.from ||
-    null;
-
+  const raw = data?.key?.remoteJid;
   return raw ? normalizeTelefone(raw.replace("@s.whatsapp.net", "")) : null;
 }
 
 // ================== DB ==================
-async function ensureTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS contatos (
-      id SERIAL PRIMARY KEY,
-      tenant TEXT,
-      telefone TEXT,
-      status TEXT,
-      updated_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE (tenant, telefone)
-    );
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mensagens (
-      id SERIAL PRIMARY KEY,
-      tenant TEXT,
-      telefone TEXT,
-      origem TEXT,
-      autor TEXT,
-      tipo TEXT,
-      conteudo TEXT,
-      message_id TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-}
-
 async function mensagemJaProcessada(messageId) {
   if (!messageId) return false;
   const { rows } = await pool.query(
@@ -124,65 +76,75 @@ async function mensagemJaProcessada(messageId) {
 }
 
 async function salvarMensagem(d) {
-  await pool.query(
-    `
+  await pool.query(`
     INSERT INTO mensagens
     (tenant, telefone, origem, autor, tipo, conteudo, message_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7)
-    `,
-    [
-      d.tenant,
-      d.telefone,
-      d.origem,
-      d.autor,
-      d.tipo,
-      d.conteudo,
-      d.message_id || null,
-    ]
-  );
+  `, [
+    d.tenant,
+    d.telefone,
+    d.origem,
+    d.autor,
+    d.tipo,
+    d.conteudo,
+    d.message_id || null
+  ]);
 }
 
 // ================== IA ==================
-async function responderIA(tenantCfg, texto) {
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+async function responderIA(prompt, texto) {
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: tenantCfg.systemPrompt },
-        { role: "user", content: texto },
+        { role: "system", content: prompt },
+        { role: "user", content: texto }
       ],
-      temperature: 0.3,
-    }),
+      temperature: 0.3
+    })
   });
 
-  const json = await resp.json();
-  return json?.choices?.[0]?.message?.content || "";
+  const j = await r.json();
+  return j?.choices?.[0]?.message?.content || "";
+}
+
+// ================== DIGISAC SEND ==================
+async function sendDigisacMessage(ticketId, texto) {
+  await fetch(`${DIGISAC_API_URL}/api/v1/messages`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${DIGISAC_API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      ticket_id: ticketId,
+      content: texto,
+      type: "text"
+    })
+  });
 }
 
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
+
+  // 🔹 EVOLUTION → SÓ HISTÓRICO
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     const body = await readJson(req);
-
     const instance = body.instance || body.instanceName;
     const tenantCfg = TENANTS[instance];
     if (!tenantCfg) return res.end("ignored");
 
     const texto = body?.data?.message?.conversation;
     const telefone = extractTelefoneEvolution(body.data);
-    const messageId = body?.data?.key?.id || null;
+    const messageId = body?.data?.key?.id;
 
     if (!texto || !telefone) return res.end("ignored");
-
-    if (await mensagemJaProcessada(messageId)) {
-      console.log("🔁 Mensagem duplicada ignorada:", messageId);
-      return res.end("ok");
-    }
+    if (await mensagemJaProcessada(messageId)) return res.end("ok");
 
     console.log(`
 ========== WHATSAPP ==========
@@ -199,32 +161,39 @@ const server = http.createServer(async (req, res) => {
       autor: "cliente",
       tipo: "text",
       conteudo: texto,
-      message_id: messageId,
+      message_id: messageId
     });
 
+    return res.end("ok");
+  }
+
+  // 🔹 DIGISAC → AQUI A ANA RESPONDE
+  if (req.method === "POST" && req.url === "/webhook/digisac") {
+    const body = await readJson(req);
+
+    if (body.event !== "message.created") return res.end("ok");
+
+    const ticketId = body.ticket?.id;
+    const telefone = normalizeTelefone(body.contact?.phone || "");
+    const texto = body.message?.content;
+
+    if (!ticketId || !telefone || !texto) return res.end("ok");
     if (!WHITELIST_TELEFONES.includes(telefone)) return res.end("ok");
 
-    const resposta = await responderIA(tenantCfg, texto);
+    const tenantCfg = TENANTS["andrade-e-teixeira"];
 
-    await salvarMensagem({
-      tenant: tenantCfg.tenantId,
-      telefone,
-      origem: "whatsapp",
-      autor: "ia",
-      tipo: "text",
-      conteudo: resposta,
-    });
+    const resposta = await responderIA(tenantCfg.systemPrompt, texto);
 
     console.log(`
-========== ANA ==========
-🤖 Para: ${telefone}
+========== ANA (DIGISAC) ==========
+🎫 Ticket: ${ticketId}
+📞 Para: ${telefone}
 📝 Resposta:
 ${resposta}
-========================
+==============================
 `);
 
-    // 🔒 NÃO ENVIAMOS WHATSAPP AGORA (EVITA CONFLITO COM DIGISAC)
-
+    await sendDigisacMessage(ticketId, resposta);
     return res.end("ok");
   }
 
@@ -232,8 +201,6 @@ ${resposta}
 });
 
 // ================== START ==================
-ensureTables().then(() => {
-  server.listen(PORT, () =>
-    console.log(`🚀 Backend rodando na porta ${PORT}`)
-  );
+server.listen(PORT, () => {
+  console.log(`🚀 Backend rodando na porta ${PORT}`);
 });
