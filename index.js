@@ -25,14 +25,25 @@ function readJson(req) {
   });
 }
 
-function extractTelefoneFromEvolution(data) {
+// -------- TELEFONE EVOLUTION --------
+function extractTelefoneEvolution(data) {
   if (data?.key?.remoteJid)
     return data.key.remoteJid.replace("@s.whatsapp.net", "");
   if (data?.key?.participant)
     return data.key.participant.replace("@s.whatsapp.net", "");
   if (data?.from)
     return data.from.replace("@s.whatsapp.net", "");
-  return "desconhecido";
+  return null;
+}
+
+// -------- TELEFONE DIGISAC --------
+function extractTelefoneDigisac(body) {
+  return (
+    body?.data?.message?.contact?.phone ||
+    body?.data?.ticket?.contact?.phone ||
+    body?.data?.contact?.phone ||
+    null
+  );
 }
 
 // ================== SERVER ==================
@@ -45,7 +56,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ======================================================
-  // =============== WEBHOOK WHATSAPP =====================
+  // ================= WEBHOOK WHATSAPP ===================
   // ======================================================
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     try {
@@ -58,9 +69,8 @@ const server = http.createServer(async (req, res) => {
         null;
 
       if (!instance || !TENANTS[instance]) {
-        console.warn("🚫 WhatsApp ignorado (instância inválida)");
         res.writeHead(200);
-        res.end();
+        res.end("ignored");
         return;
       }
 
@@ -68,31 +78,35 @@ const server = http.createServer(async (req, res) => {
       const data = body.data || {};
       const message = data.message || {};
 
-      const telefone = extractTelefoneFromEvolution(data);
+      // só texto real
+      if (!message.conversation) {
+        res.writeHead(200);
+        res.end("ignored");
+        return;
+      }
 
-      let tipo = "unknown";
-      let conteudo = "";
-
-      if (message.conversation) {
-        tipo = "text";
-        conteudo = message.conversation;
+      const telefone = extractTelefoneEvolution(data);
+      if (!telefone) {
+        res.writeHead(200);
+        res.end("ignored");
+        return;
       }
 
       console.log("========== WHATSAPP ==========");
       console.log("🏷️ Tenant:", tenant.tenantId);
       console.log("📞 Telefone:", telefone);
-      console.log("📩 Tipo:", tipo);
-      console.log("📝 Conteúdo:", conteudo);
+      console.log("📩 Tipo: text");
+      console.log("📝 Conteúdo:", message.conversation);
       console.log("📌 Status inferido: novo_lead");
       console.log("==============================");
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end({ status: "ok" });
+      res.end(JSON.stringify({ status: "ok" }));
       return;
     } catch (err) {
       console.error("❌ Erro WhatsApp:", err);
-      res.writeHead(400);
-      res.end();
+      res.writeHead(200);
+      res.end("error");
       return;
     }
   }
@@ -105,25 +119,24 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
 
       const evento = body.event || "desconhecido";
-      const telefone = body?.data?.contact?.phone || "desconhecido";
+      const telefone = extractTelefoneDigisac(body);
 
-      let status = "desconhecido";
+      let status = null;
 
       if (evento === "ticket.created") {
         status = "em_atendimento_humano";
       }
 
       if (evento === "ticket.updated") {
-        const situation = body?.data?.ticket?.status;
-        if (situation === "closed") {
+        if (body?.data?.ticket?.status === "closed") {
           status = "atendimento_encerrado";
         }
       }
 
       console.log("========== DIGISAC ==========");
-      console.log("📞 Telefone:", telefone);
+      console.log("📞 Telefone:", telefone || "desconhecido");
       console.log("🔔 Evento:", evento);
-      console.log("📌 Status atualizado:", status);
+      if (status) console.log("📌 Status atualizado:", status);
       console.log("=============================");
 
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -131,13 +144,12 @@ const server = http.createServer(async (req, res) => {
       return;
     } catch (err) {
       console.error("❌ Erro DigiSac:", err);
-      res.writeHead(400);
-      res.end();
+      res.writeHead(200);
+      res.end("error");
       return;
     }
   }
 
-  // -------- fallback --------
   res.writeHead(404);
   res.end("Not Found");
 });
