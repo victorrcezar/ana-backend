@@ -2,7 +2,7 @@ const http = require("http");
 
 const PORT = process.env.PORT || 3000;
 
-// util simples pra ler body JSON
+// ===== util para ler JSON do body =====
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -17,40 +17,68 @@ function readJson(req) {
   });
 }
 
+// ===== servidor =====
 const server = http.createServer(async (req, res) => {
-  // health check
+  // -------- health check --------
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
     return;
   }
 
-  // webhook WhatsApp
+  // -------- webhook WhatsApp --------
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     try {
       const body = await readJson(req);
 
-      // LOG BRUTO (por enquanto)
-      console.log("📩 Webhook recebido:");
-      console.log(JSON.stringify(body, null, 2));
+      /*
+        Estrutura esperada (Evolution):
+        body.data.key.remoteJid
+        body.data.message.conversation
+      */
 
-      // resposta obrigatória
+      const data = body.data || {};
+      const message = data.message || {};
+
+      // telefone
+      const telefone =
+        data.key && data.key.remoteJid
+          ? data.key.remoteJid.replace("@s.whatsapp.net", "")
+          : "desconhecido";
+
+      // normalização
+      let tipo = "unknown";
+      let conteudoTexto = "";
+
+      if (message.conversation) {
+        tipo = "text";
+        conteudoTexto = message.conversation;
+      }
+
+      // logs (fase atual)
+      console.log("========== MENSAGEM NORMALIZADA ==========");
+      console.log("📞 Telefone:", telefone);
+      console.log("📩 Tipo:", tipo);
+      console.log("📝 Conteúdo:", conteudoTexto);
+      console.log("==========================================");
+
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "received" }));
+      res.end(JSON.stringify({ status: "normalized" }));
       return;
     } catch (err) {
-      console.error("❌ Erro ao processar webhook", err);
+      console.error("❌ Erro ao processar webhook:", err);
       res.writeHead(400);
-      res.end("Invalid JSON");
+      res.end("Invalid payload");
       return;
     }
   }
 
-  // fallback
+  // -------- fallback --------
   res.writeHead(404);
   res.end("Not Found");
 });
 
+// ===== start =====
 server.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
