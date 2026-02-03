@@ -3,10 +3,12 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 
-// 🔒 FIXOS DO SEU PROJETO
 const TENANT = "andrade_teixeira";
 const ORIGEM = "whatsapp";
 const TIPO_TEXTO = "text";
+
+const DIGISAC_API_URL = process.env.DIGISAC_API_URL;
+const DIGISAC_API_TOKEN = process.env.DIGISAC_API_TOKEN;
 
 // ================== DB ==================
 const pool = new Pool({
@@ -38,6 +40,23 @@ function normalizeTelefone(raw) {
   return t;
 }
 
+// ================== DIGISAC ==================
+async function buscarTelefoneReal(contactId) {
+  const res = await fetch(`${DIGISAC_API_URL}/api/v1/contacts/${contactId}`, {
+    headers: {
+      Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
+    },
+  });
+
+  const json = await res.json();
+
+  return normalizeTelefone(
+    json?.data?.number ||
+    json?.number ||
+    ""
+  );
+}
+
 // ================== DB ==================
 async function salvarMensagem({
   tenant,
@@ -61,7 +80,6 @@ async function salvarMensagem({
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
   try {
-    // 🩺 Healthcheck
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200);
       return res.end("OK");
@@ -70,44 +88,43 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/webhook/digisac") {
       const body = await readJson(req);
 
-      console.log("📦 BODY RECEBIDO:");
-      console.log(JSON.stringify(body, null, 2));
-
       if (!body.data) return res.end("ok");
 
       const data = body.data;
 
-      // ❌ Ignora mensagens enviadas pelo sistema / humano
+      // ignora mensagens enviadas pelo sistema/humano
       if (data.isFromMe === true) return res.end("ok");
 
-      // ❌ Ignora tudo que não for texto
-      if (data.type !== "chat") return res.end("ok");
-      if (!data.text) return res.end("ok");
+      // apenas texto
+      if (data.type !== "chat" || !data.text) return res.end("ok");
 
-      const telefone = normalizeTelefone(data.contactId);
+      const telefone = await buscarTelefoneReal(data.contactId);
+      if (!telefone) return res.end("ok");
 
-      const conteudoFormatado =
+      // 🔥 LOG BONITO (SÓ NO CONSOLE)
+      console.log(
         `📞 Telefone: ${telefone}\n` +
         `📩 Tipo: text\n` +
-        `📝 Conteúdo: ${data.text}`;
+        `📝 Conteúdo: ${data.text}`
+      );
 
+      // ✅ BANCO LIMPO
       await salvarMensagem({
         tenant: TENANT,
         telefone,
         origem: ORIGEM,
         autor: "cliente",
         tipo: TIPO_TEXTO,
-        conteudo: conteudoFormatado,
+        conteudo: data.text,
       });
 
-      console.log("✅ Mensagem salva com sucesso");
+      console.log("✅ Mensagem salva corretamente");
 
       return res.end("ok");
     }
 
     res.end("OK");
   } catch (err) {
-    // 🔥 Nunca derruba o processo
     console.error("💥 ERRO CAPTURADO:", err);
     return res.end("ok");
   }
