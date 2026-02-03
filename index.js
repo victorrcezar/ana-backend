@@ -25,20 +25,13 @@ function readJson(req) {
   });
 }
 
-// Extrai telefone com fallback seguro
-function extractTelefone(data) {
-  if (data?.key?.remoteJid) {
+function extractTelefoneFromEvolution(data) {
+  if (data?.key?.remoteJid)
     return data.key.remoteJid.replace("@s.whatsapp.net", "");
-  }
-
-  if (data?.key?.participant) {
+  if (data?.key?.participant)
     return data.key.participant.replace("@s.whatsapp.net", "");
-  }
-
-  if (data?.from) {
+  if (data?.from)
     return data.from.replace("@s.whatsapp.net", "");
-  }
-
   return "desconhecido";
 }
 
@@ -51,69 +44,100 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // -------- webhook --------
+  // ======================================================
+  // =============== WEBHOOK WHATSAPP =====================
+  // ======================================================
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     try {
       const body = await readJson(req);
 
-      // ===== IDENTIFICA INSTÂNCIA =====
       const instance =
         body.instance ||
         body.instanceName ||
         body?.data?.instance ||
         null;
 
-      if (!instance) {
-        console.warn("⚠️ Mensagem sem instância. Ignorada.");
+      if (!instance || !TENANTS[instance]) {
+        console.warn("🚫 WhatsApp ignorado (instância inválida)");
         res.writeHead(200);
         res.end();
         return;
       }
 
-      // ===== VALIDA TENANT =====
       const tenant = TENANTS[instance];
-
-      if (!tenant) {
-        console.warn(`🚫 Instância não autorizada: ${instance}`);
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
-      // ===== NORMALIZA =====
       const data = body.data || {};
       const message = data.message || {};
 
-      const telefone = extractTelefone(data);
+      const telefone = extractTelefoneFromEvolution(data);
 
       let tipo = "unknown";
-      let conteudoTexto = "";
+      let conteudo = "";
 
       if (message.conversation) {
         tipo = "text";
-        conteudoTexto = message.conversation;
+        conteudo = message.conversation;
       }
 
-      // ===== LOG FINAL =====
-      console.log("========== MENSAGEM RECEBIDA ==========");
+      console.log("========== WHATSAPP ==========");
       console.log("🏷️ Tenant:", tenant.tenantId);
-      console.log("🏢 Empresa:", tenant.nome);
       console.log("📞 Telefone:", telefone);
       console.log("📩 Tipo:", tipo);
-      console.log("📝 Conteúdo:", conteudoTexto);
-      console.log("======================================");
+      console.log("📝 Conteúdo:", conteudo);
+      console.log("📌 Status inferido: novo_lead");
+      console.log("==============================");
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok" }));
+      res.end({ status: "ok" });
       return;
     } catch (err) {
-      console.error("❌ Erro no webhook:", err);
+      console.error("❌ Erro WhatsApp:", err);
       res.writeHead(400);
-      res.end("Invalid payload");
+      res.end();
       return;
     }
   }
 
+  // ======================================================
+  // ================= WEBHOOK DIGISAC ====================
+  // ======================================================
+  if (req.method === "POST" && req.url === "/webhook/digisac") {
+    try {
+      const body = await readJson(req);
+
+      const evento = body.event || "desconhecido";
+      const telefone = body?.data?.contact?.phone || "desconhecido";
+
+      let status = "desconhecido";
+
+      if (evento === "ticket.created") {
+        status = "em_atendimento_humano";
+      }
+
+      if (evento === "ticket.updated") {
+        const situation = body?.data?.ticket?.status;
+        if (situation === "closed") {
+          status = "atendimento_encerrado";
+        }
+      }
+
+      console.log("========== DIGISAC ==========");
+      console.log("📞 Telefone:", telefone);
+      console.log("🔔 Evento:", evento);
+      console.log("📌 Status atualizado:", status);
+      console.log("=============================");
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "received" }));
+      return;
+    } catch (err) {
+      console.error("❌ Erro DigiSac:", err);
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+  }
+
+  // -------- fallback --------
   res.writeHead(404);
   res.end("Not Found");
 });
