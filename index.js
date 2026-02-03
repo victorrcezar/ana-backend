@@ -1,12 +1,11 @@
 const http = require("http");
 const { Pool } = require("pg");
-const fetch = require("node-fetch");
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // ================== WHITELIST ==================
-// Telefones SEMPRE no formato 55DDDNÚMERO
+// Sempre no formato 55DDDNÚMERO
 const WHITELIST_TELEFONES = ["5527992980043"];
 
 // ================== DB ==================
@@ -26,7 +25,7 @@ const TENANTS = {
     systemPrompt: `
 Você é a ANA, assistente de atendimento inicial do escritório Andrade e Teixeira Advogados.
 Seu papel é acolher, entender a demanda e orientar os próximos passos.
-Seja clara, objetiva e profissional.
+Seja clara, educada e profissional.
 Não prometa resultados, não informe valores e não dê parecer jurídico definitivo.
 `,
   },
@@ -49,14 +48,8 @@ function readJson(req) {
 
 function normalizeTelefone(raw) {
   if (!raw) return null;
-
   let tel = raw.replace(/\D/g, "");
-
-  // Se vier sem DDI (ex: 2799...)
-  if (tel.length === 11) {
-    tel = "55" + tel;
-  }
-
+  if (tel.length === 11) tel = "55" + tel;
   return tel;
 }
 
@@ -68,7 +61,6 @@ function extractTelefoneEvolution(data) {
     null;
 
   if (!raw) return null;
-
   return normalizeTelefone(raw.replace("@s.whatsapp.net", ""));
 }
 
@@ -170,7 +162,7 @@ async function responderIA({ tenantCfg, historico, ultimaMensagem }) {
   });
 
   const json = await resp.json();
-  return json.choices?.[0]?.message?.content || "";
+  return json?.choices?.[0]?.message?.content || "";
 }
 
 // ================== SERVER ==================
@@ -224,7 +216,7 @@ const server = http.createServer(async (req, res) => {
       // 2️⃣ garantir contato
       await upsertContato(tenant, telefone, "novo_lead");
 
-      // 🔒 WHITELIST ABSOLUTA (NORMALIZADA)
+      // 🔒 WHITELIST ABSOLUTA
       if (!WHITELIST_TELEFONES.includes(telefone)) {
         console.log("ANA BLOQUEADA (WHITELIST):", telefone);
         res.end("ok");
