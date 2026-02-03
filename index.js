@@ -37,24 +37,33 @@ function readJson(req) {
 function normalizeTelefone(raw) {
   let t = String(raw || "").replace(/\D/g, "");
   if (t.length === 11) t = "55" + t;
-  return t;
+  return t || null;
 }
 
 // ================== DIGISAC ==================
 async function buscarTelefoneReal(contactId) {
-  const res = await fetch(`${DIGISAC_API_URL}/api/v1/contacts/${contactId}`, {
-    headers: {
-      Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
-    },
-  });
+  try {
+    const res = await fetch(
+      `${DIGISAC_API_URL}/api/v1/contacts/${contactId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
+        },
+        timeout: 3000, // 👈 nunca trava webhook
+      }
+    );
 
-  const json = await res.json();
+    const json = await res.json();
 
-  return normalizeTelefone(
-    json?.data?.number ||
-    json?.number ||
-    ""
-  );
+    return normalizeTelefone(
+      json?.data?.number ||
+      json?.number ||
+      null
+    );
+  } catch (err) {
+    console.error("⚠️ Falha ao buscar telefone:", err.message);
+    return null;
+  }
 }
 
 // ================== DB ==================
@@ -87,28 +96,28 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/webhook/digisac") {
       const body = await readJson(req);
-
       if (!body.data) return res.end("ok");
 
       const data = body.data;
 
-      // ignora mensagens enviadas pelo sistema/humano
+      // ignora mensagens enviadas pelo sistema
       if (data.isFromMe === true) return res.end("ok");
 
       // apenas texto
       if (data.type !== "chat" || !data.text) return res.end("ok");
 
-      const telefone = await buscarTelefoneReal(data.contactId);
-      if (!telefone) return res.end("ok");
+      // 🔒 FALLBACK SEGURO
+      let telefone = await buscarTelefoneReal(data.contactId);
+      if (!telefone) {
+        telefone = `contact:${data.contactId}`;
+      }
 
-      // 🔥 LOG BONITO (SÓ NO CONSOLE)
       console.log(
         `📞 Telefone: ${telefone}\n` +
         `📩 Tipo: text\n` +
         `📝 Conteúdo: ${data.text}`
       );
 
-      // ✅ BANCO LIMPO
       await salvarMensagem({
         tenant: TENANT,
         telefone,
@@ -118,7 +127,7 @@ const server = http.createServer(async (req, res) => {
         conteudo: data.text,
       });
 
-      console.log("✅ Mensagem salva corretamente");
+      console.log("✅ Mensagem salva (segura)");
 
       return res.end("ok");
     }
