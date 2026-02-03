@@ -44,17 +44,9 @@ function extractTelefoneEvolution(data) {
   );
 }
 
-function extractTelefoneDigisac(body) {
-  return (
-    body?.data?.message?.contact?.phone ||
-    body?.data?.ticket?.contact?.phone ||
-    body?.data?.contact?.phone ||
-    null
-  );
-}
-
-// ================== DB HELPERS ==================
-async function ensureTable() {
+// ================== DB SETUP ==================
+async function ensureTables() {
+  // contatos
   await pool.query(`
     CREATE TABLE IF NOT EXISTS contatos (
       id SERIAL PRIMARY KEY,
@@ -65,8 +57,23 @@ async function ensureTable() {
       UNIQUE (tenant, telefone)
     );
   `);
+
+  // mensagens
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mensagens (
+      id SERIAL PRIMARY KEY,
+      tenant TEXT NOT NULL,
+      telefone TEXT NOT NULL,
+      origem TEXT NOT NULL,
+      autor TEXT NOT NULL,
+      tipo TEXT NOT NULL,
+      conteudo TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 }
 
+// ================== DB HELPERS ==================
 async function upsertContato(tenant, telefone, status) {
   await pool.query(
     `
@@ -79,33 +86,31 @@ async function upsertContato(tenant, telefone, status) {
   );
 }
 
+async function salvarMensagem({
+  tenant,
+  telefone,
+  origem,
+  autor,
+  tipo,
+  conteudo,
+}) {
+  await pool.query(
+    `
+    INSERT INTO mensagens
+    (tenant, telefone, origem, autor, tipo, conteudo)
+    VALUES ($1, $2, $3, $4, $5, $6);
+    `,
+    [tenant, telefone, origem, autor, tipo, conteudo]
+  );
+}
+
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
   // -------- HEALTH --------
   if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.writeHead(200);
     res.end("OK");
     return;
-  }
-
-  // -------- DEBUG DB --------
-  if (req.method === "GET" && req.url === "/debug/db") {
-    try {
-      await upsertContato(
-        "andrade_teixeira",
-        "559999999999",
-        "teste_manual"
-      );
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "insert_ok" }));
-      return;
-    } catch (err) {
-      console.error("❌ ERRO DB:", err);
-      res.writeHead(500);
-      res.end("db_error");
-      return;
-    }
   }
 
   // ================= WHATSAPP =================
@@ -139,10 +144,22 @@ const server = http.createServer(async (req, res) => {
       }
 
       const tenant = TENANTS[instance].tenantId;
+      const texto = message.conversation;
 
+      // 1️⃣ salvar mensagem
+      await salvarMensagem({
+        tenant,
+        telefone,
+        origem: "whatsapp",
+        autor: "cliente",
+        tipo: "text",
+        conteudo: texto,
+      });
+
+      // 2️⃣ garantir status
       await upsertContato(tenant, telefone, "novo_lead");
 
-      console.log("WHATSAPP:", tenant, telefone, "novo_lead");
+      console.log("WHATSAPP MSG:", tenant, telefone, texto);
 
       res.end("ok");
       return;
@@ -153,58 +170,18 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ================= DIGISAC =================
-  if (req.method === "POST" && req.url === "/webhook/digisac") {
-    try {
-      const body = await readJson(req);
-      const evento = body.event;
-      const telefone = extractTelefoneDigisac(body);
-
-      if (!telefone) {
-        res.end("ignored");
-        return;
-      }
-
-      let status = null;
-
-      if (evento === "ticket.created") {
-        status = "em_atendimento_humano";
-      }
-
-      if (
-        evento === "ticket.updated" &&
-        body?.data?.ticket?.status === "closed"
-      ) {
-        status = "atendimento_encerrado";
-      }
-
-      if (status) {
-        await upsertContato("andrade_teixeira", telefone, status);
-        console.log("DIGISAC:", telefone, status);
-      }
-
-      res.end("ok");
-      return;
-    } catch (err) {
-      console.error("❌ Erro DigiSac:", err);
-      res.end("error");
-      return;
-    }
-  }
-
-  // -------- FALLBACK --------
   res.writeHead(404);
   res.end("Not Found");
 });
 
 // ================== START ==================
-ensureTable()
+ensureTables()
   .then(() => {
     server.listen(PORT, () => {
       console.log(`🚀 Backend rodando na porta ${PORT}`);
     });
   })
   .catch((err) => {
-    console.error("❌ ERRO AO INICIAR DB:", err);
+    console.error("❌ ERRO AO INICIAR:", err);
     process.exit(1);
   });
