@@ -3,8 +3,9 @@ const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 
-// 🔒 TENANT FIXO (por enquanto)
+// 🔒 Tenant fixo por enquanto
 const TENANT = "andrade_teixeira";
+const ORIGEM = "whatsapp";
 
 // ================== DB ==================
 const pool = new Pool({
@@ -37,20 +38,20 @@ function normalizeTelefone(raw) {
 }
 
 // ================== DB HELPERS ==================
-async function salvarMensagem({ tenant, telefone, autor, conteudo }) {
+async function salvarMensagem({ tenant, telefone, origem, autor, conteudo }) {
   await pool.query(
     `
-    INSERT INTO mensagens (tenant, telefone, autor, conteudo)
-    VALUES ($1,$2,$3,$4)
+    INSERT INTO mensagens (tenant, telefone, origem, autor, conteudo)
+    VALUES ($1,$2,$3,$4,$5)
   `,
-    [tenant, telefone, autor, conteudo]
+    [tenant, telefone, origem, autor, conteudo]
   );
 }
 
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
   try {
-    // Healthcheck (evita SIGTERM por orquestrador)
+    // Healthcheck (evita SIGTERM do orquestrador)
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200);
       return res.end("OK");
@@ -73,6 +74,7 @@ const server = http.createServer(async (req, res) => {
         return res.end("ok");
       }
 
+      // Apenas mensagens de chat
       if (data.type !== "chat") {
         return res.end("ok");
       }
@@ -85,9 +87,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       // ⚠️ Enquanto o DigiSac não envia telefone direto,
-      // usamos o contactId como fallback seguro
+      // usamos contactId como fallback técnico
       const telefone = normalizeTelefone(contactId);
 
+      // 🧾 CONTEÚDO NO FORMATO QUE VOCÊ PEDIU
       const conteudoFormatado =
         `📞 Telefone: ${telefone}\n` +
         `📩 Tipo: text\n` +
@@ -96,6 +99,7 @@ const server = http.createServer(async (req, res) => {
       await salvarMensagem({
         tenant: TENANT,
         telefone,
+        origem: ORIGEM,
         autor: "cliente",
         conteudo: conteudoFormatado,
       });
@@ -107,9 +111,9 @@ const server = http.createServer(async (req, res) => {
 
     res.end("OK");
   } catch (err) {
-    // 🔥 TRAVA DE SEGURANÇA — NUNCA MAIS CAI O PROCESSO
+    // 🔥 NUNCA MAIS DERRUBA O PROCESSO
     console.error("💥 ERRO CAPTURADO:", err);
-    res.end("ok");
+    return res.end("ok");
   }
 });
 
