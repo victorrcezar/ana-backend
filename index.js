@@ -21,12 +21,18 @@ function readJson(req) {
   return new Promise(resolve => {
     let data = "";
     req.on("data", c => (data += c));
-    req.on("end", () => resolve(JSON.parse(data || "{}")));
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data || "{}"));
+      } catch {
+        resolve({});
+      }
+    });
   });
 }
 
 function normalizeTelefone(raw) {
-  let t = raw.replace(/\D/g, "");
+  let t = String(raw || "").replace(/\D/g, "");
   if (t.length === 11) t = "55" + t;
   return t;
 }
@@ -83,26 +89,34 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/webhook/digisac") {
     const body = await readJson(req);
 
-    // Aceita apenas novas mensagens
-    if (body.event !== "message.created") {
+    // 🔎 Validação estrutural (DigiSac não envia "event" fixo)
+    if (!body.message || !body.ticket || !body.contact) {
       return res.end("ok");
     }
 
     const msg = body.message;
 
-    // Ignora mensagens da própria plataforma
-    if (!msg || msg.from_me === true) {
+    // Ignora mensagens enviadas pela própria plataforma
+    if (msg.from_me === true) {
       return res.end("ok");
     }
 
-    // Apenas texto
+    // Apenas mensagens de texto
     if (msg.type !== "text") {
       return res.end("ok");
     }
 
-    const telefone = normalizeTelefone(body.contact?.phone || "");
-    const texto = msg.content;
-    const ticketId = body.ticket?.id;
+    const telefone = normalizeTelefone(
+      body.contact.phone || body.contact.number || ""
+    );
+
+    const texto =
+      msg.content ||
+      msg.text ||
+      msg.body ||
+      "";
+
+    const ticketId = body.ticket.id;
 
     if (!telefone || !texto || !ticketId) {
       return res.end("ok");
