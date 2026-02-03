@@ -55,9 +55,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ======================================================
-  // ================= WEBHOOK WHATSAPP ===================
-  // ======================================================
+  // ================= WHATSAPP =================
   if (req.method === "POST" && req.url === "/webhook/whatsapp") {
     try {
       const body = await readJson(req);
@@ -74,11 +72,10 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const tenant = TENANTS[instance];
       const data = body.data || {};
       const message = data.message || {};
 
-      // só texto real
+      // ignora eventos que não são mensagem de texto
       if (!message.conversation) {
         res.writeHead(200);
         res.end("ignored");
@@ -91,6 +88,8 @@ const server = http.createServer(async (req, res) => {
         res.end("ignored");
         return;
       }
+
+      const tenant = TENANTS[instance];
 
       console.log("========== WHATSAPP ==========");
       console.log("🏷️ Tenant:", tenant.tenantId);
@@ -111,9 +110,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ======================================================
-  // ================= WEBHOOK DIGISAC ====================
-  // ======================================================
+  // ================= DIGISAC =================
   if (req.method === "POST" && req.url === "/webhook/digisac") {
     try {
       const body = await readJson(req);
@@ -127,10 +124,11 @@ const server = http.createServer(async (req, res) => {
         status = "em_atendimento_humano";
       }
 
-      if (evento === "ticket.updated") {
-        if (body?.data?.ticket?.status === "closed") {
-          status = "atendimento_encerrado";
-        }
+      if (
+        evento === "ticket.updated" &&
+        body?.data?.ticket?.status === "closed"
+      ) {
+        status = "atendimento_encerrado";
       }
 
       console.log("========== DIGISAC ==========");
