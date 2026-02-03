@@ -1,23 +1,6 @@
 const http = require("http");
-const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
-
-const TENANT = "andrade_teixeira";
-const ORIGEM = "whatsapp";
-const TIPO_TEXTO = "text";
-
-const DIGISAC_API_URL = process.env.DIGISAC_API_URL;
-const DIGISAC_API_TOKEN = process.env.DIGISAC_API_TOKEN;
-
-// ================== DB ==================
-const pool = new Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT || 5432),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-});
 
 // ================== UTIL ==================
 function readJson(req) {
@@ -27,118 +10,40 @@ function readJson(req) {
     req.on("end", () => {
       try {
         resolve(JSON.parse(data || "{}"));
-      } catch {
+      } catch (e) {
+        console.error("❌ JSON INVALIDO:", data);
         resolve({});
       }
     });
   });
 }
 
-function normalizeTelefone(raw) {
-  let t = String(raw || "").replace(/\D/g, "");
-  if (t.length === 11) t = "55" + t;
-  return t || null;
-}
-
-// ================== DIGISAC ==================
-async function buscarTelefoneReal(contactId) {
-  try {
-    const res = await fetch(
-      `${DIGISAC_API_URL}/api/v1/contacts/${contactId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${DIGISAC_API_TOKEN}`,
-        },
-        timeout: 3000, // 👈 nunca trava webhook
-      }
-    );
-
-    const json = await res.json();
-
-    return normalizeTelefone(
-      json?.data?.number ||
-      json?.number ||
-      null
-    );
-  } catch (err) {
-    console.error("⚠️ Falha ao buscar telefone:", err.message);
-    return null;
-  }
-}
-
-// ================== DB ==================
-async function salvarMensagem({
-  tenant,
-  telefone,
-  origem,
-  autor,
-  tipo,
-  conteudo,
-}) {
-  await pool.query(
-    `
-    INSERT INTO mensagens
-      (tenant, telefone, origem, autor, tipo, conteudo)
-    VALUES
-      ($1,$2,$3,$4,$5,$6)
-  `,
-    [tenant, telefone, origem, autor, tipo, conteudo]
-  );
-}
-
 // ================== SERVER ==================
 const server = http.createServer(async (req, res) => {
-  try {
-    if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200);
-      return res.end("OK");
-    }
+  // Healthcheck
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200);
+    return res.end("OK");
+  }
 
-    if (req.method === "POST" && req.url === "/webhook/digisac") {
-      const body = await readJson(req);
-      if (!body.data) return res.end("ok");
+  if (req.method === "POST" && req.url === "/webhook/digisac") {
+    const body = await readJson(req);
 
-      const data = body.data;
+    console.log("================================================");
+    console.log("📦 WEBHOOK DIGISAC RECEBIDO (CRU)");
+    console.log("🕒 DATA:", new Date().toISOString());
+    console.log("🔗 HEADERS:");
+    console.log(req.headers);
+    console.log("📦 BODY COMPLETO:");
+    console.log(JSON.stringify(body, null, 2));
+    console.log("================================================");
 
-      // ignora mensagens enviadas pelo sistema
-      if (data.isFromMe === true) return res.end("ok");
-
-      // apenas texto
-      if (data.type !== "chat" || !data.text) return res.end("ok");
-
-      // 🔒 FALLBACK SEGURO
-      let telefone = await buscarTelefoneReal(data.contactId);
-      if (!telefone) {
-        telefone = `contact:${data.contactId}`;
-      }
-
-      console.log(
-        `📞 Telefone: ${telefone}\n` +
-        `📩 Tipo: text\n` +
-        `📝 Conteúdo: ${data.text}`
-      );
-
-      await salvarMensagem({
-        tenant: TENANT,
-        telefone,
-        origem: ORIGEM,
-        autor: "cliente",
-        tipo: TIPO_TEXTO,
-        conteudo: data.text,
-      });
-
-      console.log("✅ Mensagem salva (segura)");
-
-      return res.end("ok");
-    }
-
-    res.end("OK");
-  } catch (err) {
-    console.error("💥 ERRO CAPTURADO:", err);
     return res.end("ok");
   }
+
+  res.end("OK");
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Backend rodando na porta ${PORT}`);
+  console.log(`🚀 Backend CRU rodando na porta ${PORT}`);
 });
